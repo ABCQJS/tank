@@ -1,0 +1,572 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="GBK">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>坦克对战</title>
+    <style>
+        * {margin:0;padding:0;box-sizing:border-box;}
+        body {background:#1a1a1a;display:flex;flex-direction:column;align-items:center;overflow:hidden;color:#fff;}
+        #gameCanvas {border:2px solid #fff;background:#4a6fa5;width:100vw;max-width:480px;height:70vh;}
+        .controls {width:100vw;max-width:480px;height:30vh;display:flex;justify-content:space-around;align-items:center;background:#333;padding:10px;}
+        .btn {width:60px;height:60px;border-radius:50%;border:2px solid #fff;color:#fff;font-size:16px;background:rgba(255,255,255,0.2);display:flex;align-items:center;justify-content:center;}
+        .fire-btn {width:80px;height:80px;background:rgba(255,0,0,0.5);}
+        .move-area {display:grid;grid-template-columns:repeat(3,1fr);gap:10px;}
+        .rotate-area {display:grid;grid-template-columns:repeat(3,1fr);gap:10px;}
+        #winScreen {position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(0,0,0,0.8);padding:30px;border-radius:10px;text-align:center;display:none;}
+        #nextRound {margin-top:20px;padding:10px 20px;font-size:18px;background:#4CAF50;border:none;color:#fff;border-radius:5px;cursor:pointer;}
+        #loseScreen {position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(0,0,0,0.8);padding:30px;border-radius:10px;text-align:center;display:none;}
+        #retryBtn {margin-top:20px;padding:10px 20px;font-size:18px;background:#f44336;border:none;color:#fff;border-radius:5px;cursor:pointer;}
+    </style>
+</head>
+<body>
+    <canvas id="gameCanvas"></canvas>
+    <div class="controls">
+        <div class="move-area">
+            <div></div><button class="btn" id="forward">前</button><div></div>
+            <button class="btn" id="left">左</button><div></div><button class="btn" id="right">右</button>
+            <div></div><button class="btn" id="back">后</button><div></div>
+        </div>
+        <div>
+            <div class="rotate-area">
+                <div></div><button class="btn" id="barrelUp">↑</button><div></div>
+                <div></div><div></div><div></div>
+                <div></div><button class="btn" id="barrelDown">↓</button><div></div>
+            </div>
+            <button class="btn fire-btn" id="fire">发射</button>
+        </div>
+    </div>
+    <div id="winScreen">
+        <h2>胜利！</h2>
+        <p>成功击败敌人</p>
+        <button id="nextRound">下一轮</button>
+    </div>
+    <div id="loseScreen">
+        <h2>你被击中了！</h2>
+        <p>再接再厉</p>
+        <button id="retryBtn">重新开始</button>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        canvas.width = 480;
+        canvas.height = 640;
+        const cw = canvas.width;
+        const ch = canvas.height;
+        const winScreen = document.getElementById('winScreen');
+        const nextRoundBtn = document.getElementById('nextRound');
+        const loseScreen = document.getElementById('loseScreen');
+        const retryBtn = document.getElementById('retryBtn');
+
+        // ========== 超长滚动地形 ==========
+        const WORLD_WIDTH = cw * 3;
+        let cameraX = 0;
+        let ground = [];
+
+        function initGround() {
+            ground = [];
+            for (let i = 0; i < WORLD_WIDTH; i++) {
+                ground[i] = ch - 60
+                     - Math.sin(i * 0.02) * 40
+                     - Math.cos(i * 0.04) * 25;
+            }
+        }
+
+        // ========== 双锁定：玩家+敌人 ==========
+        const player = {
+            x: 100, y: 0, w: 25, h: 15,
+            barrelAngle: -0.3, speed: 2
+        };
+        const enemy = {
+            x: 300, y: 0, w: 25, h: 15,
+            alive: true, speed: 1, dir: 1,
+            moveTimer: 0, moveTarget: 300
+        };
+
+        // ========== 回合制 ==========
+        let canFire = true;
+        let bullets = [];
+        let explosions = [];
+        let isGameActive = true;
+
+        // 按键
+        const keys = {
+            forward: false, back: false, left: false, right: false,
+            barrelUp: false, barrelDown: false
+        };
+
+        // ========== 初始化 ==========
+        function initGame() {
+            initGround();
+            player.x = 100;
+            player.barrelAngle = -0.3;
+            enemy.x = 300;
+            enemy.moveTarget = 300;
+            enemy.dir = 1;
+            enemy.alive = true;
+            bullets = []; explosions = [];
+            canFire = true; isGameActive = true;
+            winScreen.style.display = 'none';
+            loseScreen.style.display = 'none';
+            updateTankY();
+            updateCamera();
+        }
+
+        // 坦克贴地
+        function updateTankY() {
+            let pg = Math.floor(player.x);
+            pg = Math.max(0, Math.min(WORLD_WIDTH - 1, pg));
+            player.y = ground[pg] - player.h;
+
+            let eg = Math.floor(enemy.x);
+            eg = Math.max(0, Math.min(WORLD_WIDTH - 1, eg));
+            enemy.y = ground[eg] - enemy.h;
+        }
+
+        // ========== 相机系统：保证双方可见 ==========
+        function updateCamera() {
+            if (!enemy.alive) {
+                // 敌人死了，相机跟随玩家居中
+                cameraX = player.x - cw / 2;
+            } else {
+                // 两者都在时，相机居中于两者之间
+                let midX = (player.x + enemy.x) / 2;
+                let dist = Math.abs(enemy.x - player.x);
+
+                if (dist + 80 <= cw) {
+                    // 两者距离小于画布宽度，居中显示都能看到
+                    cameraX = midX - cw / 2;
+                } else {
+                    // 距离过远，优先跟随玩家，玩家在左1/3
+                    cameraX = player.x - cw / 3;
+                }
+            }
+
+            // 相机边界锁死（不会超出世界）
+            cameraX = Math.max(0, Math.min(WORLD_WIDTH - cw, cameraX));
+        }
+
+        // ========== 绘制天空 ==========
+        function drawSky() {
+            let gradient = ctx.createLinearGradient(0, 0, 0, ch * 0.7);
+            gradient.addColorStop(0, '#87CEEB');
+            gradient.addColorStop(1, '#4a6fa5');
+            ctx.fillStyle = gradient;
+            ctx.fillRect(0, 0, cw, ch);
+        }
+
+        // ========== 绘制地面 ==========
+        function drawGround() {
+            ctx.fillStyle = '#8B4513';
+            ctx.beginPath();
+            ctx.moveTo(0, ch);
+            for (let i = 0; i < cw; i++) {
+                let wx = Math.floor(i + cameraX);
+                wx = Math.max(0, Math.min(WORLD_WIDTH - 1, wx));
+                ctx.lineTo(i, ground[wx]);
+            }
+            ctx.lineTo(cw, ch);
+            ctx.closePath();
+            ctx.fill();
+
+            // 绘制草地表层
+            ctx.strokeStyle = '#228B22';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            for (let i = 0; i < cw; i++) {
+                let wx = Math.floor(i + cameraX);
+                wx = Math.max(0, Math.min(WORLD_WIDTH - 1, wx));
+                if (i === 0) ctx.moveTo(i, ground[wx]);
+                else ctx.lineTo(i, ground[wx]);
+            }
+            ctx.stroke();
+        }
+
+        function drawPlayer() {
+            let sx = player.x - cameraX;
+            let cy = player.y + player.h / 2;
+            ctx.save();
+            ctx.translate(sx, cy);
+
+            // 坦克车身（跟随地形倾斜）
+            let leftGround = ground[Math.max(0, Math.min(WORLD_WIDTH - 1, Math.floor(player.x - player.w / 2)))];
+            let rightGround = ground[Math.max(0, Math.min(WORLD_WIDTH - 1, Math.floor(player.x + player.w / 2)))];
+            let bodyAngle = Math.atan2(rightGround - leftGround, player.w);
+            ctx.rotate(bodyAngle);
+
+            // 履带
+            ctx.fillStyle = '#2d5a1b';
+            ctx.fillRect(-player.w / 2 - 2, -player.h / 2 + 2, player.w + 4, player.h - 2);
+
+            // 车身
+            ctx.fillStyle = '#3a7a2a';
+            ctx.fillRect(-player.w / 2, -player.h / 2, player.w, player.h);
+
+            // 炮塔
+            ctx.fillStyle = '#2d5a1b';
+            ctx.beginPath();
+            ctx.arc(0, -2, 8, 0, Math.PI * 2);
+            ctx.fill();
+
+            ctx.restore();
+
+            // 炮管（独立旋转，使用 barrelAngle）
+            ctx.save();
+            ctx.translate(sx, cy - 2);
+            ctx.rotate(player.barrelAngle);
+            ctx.strokeStyle = '#1a3a10';
+            ctx.lineWidth = 4;
+            ctx.beginPath();
+            ctx.moveTo(0, 0);
+            ctx.lineTo(25, 0);
+            ctx.stroke();
+            // 炮口
+            ctx.fillStyle = '#1a3a10';
+            ctx.beginPath();
+            ctx.arc(25, 0, 3, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.restore();
+        }
+
+        function drawEnemy() {
+            if (!enemy.alive) return;
+            let sx = enemy.x - cameraX;
+            let cy = enemy.y + enemy.h / 2;
+            ctx.save();
+            ctx.translate(sx, cy);
+
+            // 车身倾斜
+            let leftGround = ground[Math.max(0, Math.min(WORLD_WIDTH - 1, Math.floor(enemy.x - enemy.w / 2)))];
+            let rightGround = ground[Math.max(0, Math.min(WORLD_WIDTH - 1, Math.floor(enemy.x + enemy.w / 2)))];
+            let bodyAngle = Math.atan2(rightGround - leftGround, enemy.w);
+            ctx.rotate(bodyAngle);
+
+            // 履带
+            ctx.fillStyle = '#8b1a1a';
+            ctx.fillRect(-enemy.w / 2 - 2, -enemy.h / 2 + 2, enemy.w + 4, enemy.h - 2);
+
+            // 车身
+            ctx.fillStyle = '#cc3333';
+            ctx.fillRect(-enemy.w / 2, -enemy.h / 2, enemy.w, enemy.h);
+
+            // 炮塔
+            ctx.fillStyle = '#8b1a1a';
+            ctx.beginPath();
+            ctx.arc(0, -2, 8, 0, Math.PI * 2);
+            ctx.fill();
+
+            // 炮管（指向左边，朝向玩家）
+            let aimAngle = Math.atan2(player.y - enemy.y, player.x - enemy.x);
+            ctx.restore();
+
+            ctx.save();
+            ctx.translate(sx, cy - 2);
+            ctx.rotate(aimAngle);
+            ctx.strokeStyle = '#661111';
+            ctx.lineWidth = 4;
+            ctx.beginPath();
+            ctx.moveTo(0, 0);
+            ctx.lineTo(25, 0);
+            ctx.stroke();
+            ctx.fillStyle = '#661111';
+            ctx.beginPath();
+            ctx.arc(25, 0, 3, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.restore();
+        }
+
+        // 炸坑
+        function createCrater(x, r) {
+            x = Math.floor(x);
+            for (let dx = -r; dx <= r; dx++) {
+                let pos = x + dx;
+                if (pos < 0 || pos >= WORLD_WIDTH) continue;
+                ground[pos] += Math.sqrt(r * r - dx * dx) * 0.6;
+            }
+        }
+
+        // 炮弹 & 爆炸
+        function drawBullets() {
+            for (let i = explosions.length - 1; i >= 0; i--) {
+                let e = explosions[i];
+                // 多层爆炸效果
+                ctx.globalAlpha = e.alpha;
+                ctx.fillStyle = '#ff4500';
+                ctx.beginPath();
+                ctx.arc(e.x - cameraX, e.y, e.r * 1.2, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.fillStyle = 'orange';
+                ctx.beginPath();
+                ctx.arc(e.x - cameraX, e.y, e.r, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.fillStyle = 'yellow';
+                ctx.beginPath();
+                ctx.arc(e.x - cameraX, e.y, e.r * 0.5, 0, Math.PI * 2);
+                ctx.fill();
+                e.r += 0.8;
+                e.alpha -= 0.03;
+                if (e.alpha <= 0) explosions.splice(i, 1);
+            }
+            ctx.globalAlpha = 1;
+
+            for (let i = bullets.length - 1; i >= 0; i--) {
+                let b = bullets[i];
+
+                // 炮弹拖尾
+                ctx.globalAlpha = 0.4;
+                ctx.fillStyle = b.isEnemy ? '#ff6666' : '#ffff66';
+                ctx.beginPath();
+                ctx.arc(b.x - cameraX - b.vx, b.y - b.vy, 3, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.globalAlpha = 1;
+
+                // 炮弹本体
+                ctx.beginPath();
+                ctx.arc(b.x - cameraX, b.y, 4, 0, Math.PI * 2);
+                ctx.fillStyle = b.isEnemy ? 'red' : 'yellow';
+                ctx.fill();
+
+                b.x += b.vx;
+                b.y += b.vy;
+                b.vy += 0.2; // 重力
+
+                let g = Math.floor(b.x);
+                g = Math.max(0, Math.min(WORLD_WIDTH - 1, g));
+                if (b.y > ground[g] - 5) {
+                    explosions.push({ x: b.x, y: ground[g], r: 5, alpha: 1 });
+                    createCrater(b.x, 12);
+                    bullets.splice(i, 1);
+                    checkReload();
+                    continue;
+                }
+
+                // 玩家炮弹命中敌人
+                if (!b.isEnemy && enemy.alive) {
+                    if (Math.abs(b.x - enemy.x) < enemy.w && Math.abs(b.y - (enemy.y + enemy.h / 2)) < enemy.h) {
+                        explosions.push({ x: enemy.x, y: enemy.y + enemy.h / 2, r: 10, alpha: 1 });
+                        enemy.alive = false;
+                        bullets.splice(i, 1);
+                        setTimeout(() => { isGameActive = false; winScreen.style.display = 'block'; }, 800);
+                        checkReload();
+                        continue;
+                    }
+                }
+
+                // 敌人炮弹命中玩家
+                if (b.isEnemy) {
+                    if (Math.abs(b.x - player.x) < player.w && Math.abs(b.y - (player.y + player.h / 2)) < player.h) {
+                        explosions.push({ x: player.x, y: player.y + player.h / 2, r: 10, alpha: 1 });
+                        bullets.splice(i, 1);
+                        isGameActive = false;
+                        setTimeout(() => { loseScreen.style.display = 'block'; }, 500);
+                        checkReload();
+                        continue;
+                    }
+                }
+
+                // 出界销毁
+                if (b.x < 0 || b.x >= WORLD_WIDTH || b.y < -200) {
+                    bullets.splice(i, 1);
+                    checkReload();
+                }
+            }
+        }
+
+        function checkReload() {
+            if (bullets.length === 0) canFire = true;
+        }
+
+        // ========== 回合制开火 ==========
+        function fire() {
+            if (!isGameActive || !canFire) return;
+            canFire = false;
+
+            let vx = Math.cos(player.barrelAngle) * 8;
+            let vy = Math.sin(player.barrelAngle) * 8;
+            bullets.push({ x: player.x, y: player.y + player.h / 2 - 2, vx: vx, vy: vy, isEnemy: false });
+
+            // 敌人延迟反击
+            setTimeout(() => {
+                if (!enemy.alive || !isGameActive) return;
+                let dx = player.x - enemy.x;
+                let dy = (player.y + player.h / 2) - (enemy.y + enemy.h / 2);
+                let dist = Math.hypot(dx, dy);
+
+                // 计算抛物线补偿：考虑重力的简单弹道计算
+                let speed = 7;
+                let t = dist / speed; // 粗略飞行时间
+                let gravityCompensation = 0.5 * 0.2 * t; // 补偿重力下坠
+
+                let aimVx = (dx / dist) * speed;
+                let aimVy = (dy / dist) * speed - gravityCompensation;
+
+                // 加入一点随机偏差，让敌人不总是精准命中
+                aimVx += (Math.random() - 0.5) * 1.5;
+                aimVy += (Math.random() - 0.5) * 1.0;
+
+                bullets.push({
+                    x: enemy.x, y: enemy.y + enemy.h / 2 - 2,
+                    vx: aimVx, vy: aimVy,
+                    isEnemy: true
+                });
+            }, 800);
+        }
+
+        // ========== 控制 ==========
+        function handleInput() {
+            if (!isGameActive) return;
+            // 左右直接移动坦克
+            if (keys.left) player.x -= player.speed;
+            if (keys.right) player.x += player.speed;
+            if (keys.forward) player.x += player.speed;
+            if (keys.back) player.x -= player.speed;
+            if (keys.barrelUp) player.barrelAngle -= 0.03;
+            if (keys.barrelDown) player.barrelAngle += 0.03;
+
+            // 限制炮管角度范围（向上 -80° 到水平偏下 10°）
+            player.barrelAngle = Math.max(-Math.PI * 0.45, Math.min(Math.PI * 0.06, player.barrelAngle));
+
+            // 玩家世界边界锁死
+            player.x = Math.max(player.w, Math.min(WORLD_WIDTH - player.w, player.x));
+        }
+
+        // ========== 敌人AI移动 ==========
+        function updateEnemy() {
+            if (!enemy.alive || !isGameActive) return;
+
+            // 敌人在一定范围内来回巡逻
+            let dx = enemy.moveTarget - enemy.x;
+            if (Math.abs(dx) < 2) {
+                // 到达目标，选择新目标
+                enemy.moveTimer++;
+                if (enemy.moveTimer > 60) { // 停顿约1秒后再移动
+                    enemy.moveTimer = 0;
+                    // 在自身周围 100~200px 范围内随机选点
+                    let offset = (100 + Math.random() * 100) * (Math.random() > 0.5 ? 1 : -1);
+                    enemy.moveTarget = enemy.x + offset;
+                    // 限制在世界范围内
+                    enemy.moveTarget = Math.max(enemy.w, Math.min(WORLD_WIDTH - enemy.w, enemy.moveTarget));
+                }
+            } else {
+                // 朝目标移动
+                enemy.x += Math.sign(dx) * enemy.speed;
+            }
+        }
+
+        // ========== 绑定事件 ==========
+        function bindControl() {
+            Object.keys(keys).forEach(k => {
+                let btn = document.getElementById(k);
+                if (btn) {
+                    btn.addEventListener('touchstart', (e) => { e.preventDefault(); keys[k] = true; });
+                    btn.addEventListener('touchend', (e) => { e.preventDefault(); keys[k] = false; });
+                    // 鼠标支持（PC端）
+                    btn.addEventListener('mousedown', () => keys[k] = true);
+                    btn.addEventListener('mouseup', () => keys[k] = false);
+                    btn.addEventListener('mouseleave', () => keys[k] = false);
+                }
+            });
+
+            let fireBtn = document.getElementById('fire');
+            fireBtn.addEventListener('touchstart', (e) => { e.preventDefault(); fire(); });
+            fireBtn.addEventListener('click', fire);
+
+            nextRoundBtn.addEventListener('click', initGame);
+            retryBtn.addEventListener('click', initGame);
+
+            document.addEventListener('keydown', e => {
+                switch (e.key) {
+                    case 'ArrowUp': keys.forward = true; break;
+                    case 'ArrowDown': keys.back = true; break;
+                    case 'ArrowLeft': keys.left = true; break;
+                    case 'ArrowRight': keys.right = true; break;
+                    case 'w': case 'W': keys.barrelUp = true; break;
+                    case 's': case 'S': keys.barrelDown = true; break;
+                    case ' ': e.preventDefault(); fire(); break;
+                }
+            });
+            document.addEventListener('keyup', e => {
+                switch (e.key) {
+                    case 'ArrowUp': keys.forward = false; break;
+                    case 'ArrowDown': keys.back = false; break;
+                    case 'ArrowLeft': keys.left = false; break;
+                    case 'ArrowRight': keys.right = false; break;
+                    case 'w': case 'W': keys.barrelUp = false; break;
+                    case 's': case 'S': keys.barrelDown = false; break;
+                }
+            });
+        }
+
+        // ========== 瞄准辅助线 ==========
+        function drawAimLine() {
+            if (!isGameActive) return;
+            let sx = player.x - cameraX;
+            let sy = player.y + player.h / 2 - 2;
+            ctx.save();
+            ctx.setLineDash([4, 4]);
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+
+            // 模拟弹道预览（短距离）
+            let simX = 0, simY = 0;
+            let svx = Math.cos(player.barrelAngle) * 8;
+            let svy = Math.sin(player.barrelAngle) * 8;
+            ctx.moveTo(sx, sy);
+            for (let t = 0; t < 20; t++) {
+                simX += svx;
+                simY += svy;
+                svy += 0.2;
+                ctx.lineTo(sx + simX, sy + simY);
+            }
+            ctx.stroke();
+            ctx.setLineDash([]);
+            ctx.restore();
+        }
+
+        // ========== HUD 信息 ==========
+        function drawHUD() {
+            ctx.fillStyle = 'rgba(0,0,0,0.5)';
+            ctx.fillRect(5, 5, 120, 30);
+            ctx.fillStyle = '#fff';
+            ctx.font = '12px sans-serif';
+
+            let angleDeg = Math.round(-player.barrelAngle * 180 / Math.PI);
+            ctx.fillText('炮管角度: ' + angleDeg + '°', 10, 24);
+
+            // 装填状态
+            if (canFire) {
+                ctx.fillStyle = '#4CAF50';
+                ctx.fillText('● 可发射', 135, 24);
+            } else {
+                ctx.fillStyle = '#f44336';
+                ctx.fillText('○ 装填中', 135, 24);
+            }
+        }
+
+        // ========== 主循环 ==========
+        function loop() {
+            handleInput();
+            updateEnemy();
+            updateTankY();
+            updateCamera();
+
+            ctx.clearRect(0, 0, cw, ch);
+            drawSky();
+            drawGround();
+            drawPlayer();
+            drawEnemy();
+            drawAimLine();
+            drawBullets();
+            drawHUD();
+
+            requestAnimationFrame(loop);
+        }
+
+        bindControl();
+        initGame();
+        loop();
+    </script>
+</body>
+</html>
